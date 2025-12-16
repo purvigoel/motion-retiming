@@ -8,6 +8,7 @@ from torch import Tensor
 from model.rotation2xyz import Rotation2xyz
 from gthmr.lib.models.vibe_component import TemporalEncoder
 import ipdb
+from generative_infill.TimeWarper import TimeWarpWrapper
 
 class PositionalEncodingMotion(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=500, batch_first=False):
@@ -339,6 +340,13 @@ class MDM(nn.Module):
 
         self.rot2xyz = Rotation2xyz(device='cpu', dataset=self.dataset)
 
+        self.warp = True
+        if self.warp:
+            self.num_frames = 60
+            self.timewarper = TimeWarpWrapper(None, self.num_frames)
+            self.prelu = torch.nn.PReLU()
+            self.mlp = Classifier(self.latent_dim, self.num_frames)
+
     def parameters_wo_clip(self):
         return [
             p for name, p in self.named_parameters()
@@ -518,8 +526,14 @@ class MDM(nn.Module):
             xseq = self.sequence_pos_encoder(xseq)  # [seqlen, bs, d]
             output, _ = self.gru(xseq)
 
-        output = self.output_process(output)  # [bs, njoints, nfeats, nframes]
+        if self.warp:
+            pred_warp = self.mlp(output.permute(1, 2, 0).reshape(bs, -1))
+            output_motion = self.output_process(output)
+            pred_warp = self.prelu(pred_warp)
+            output = self.timewarper.time_warp.bake_differentiable( torch.tensor(y["keyframe"]).to(output_motion.device).permute(0, 2, 1).unsqueeze(2), pred_warp, normalized=True, num_frames=self.num_frames) + output_motion
 
+        else:
+            output = self.output_process(output)  # [bs, njoints, nfeats, nframes]
 
         # ipdb.set_trace()
         return output
@@ -573,6 +587,22 @@ class TimestepEmbedder(nn.Module):
         return self.time_embed(
             self.sequence_pos_encoder.pe[timesteps]).permute(1, 0, 2)
 
+class Classifier(torch.nn.Module):
+    def __init__(self, latent_dim, nclasses):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.nfeats = nclasses
+        self.time_embed = nn.Sequential(
+            nn.Linear(self.latent_dim * nclasses, self.latent_dim * 2),
+            nn.SiLU(),
+            nn.Linear(self.latent_dim * 2, self.latent_dim),
+            nn.SiLU(),
+            nn.Linear(self.latent_dim, self.nfeats)
+        )
+
+    def forward(self, motion):
+        #motion = motion.permute(1, 2, 3, 0)
+        return self.time_embed(motion)
 
 class InputProcess(nn.Module):
 

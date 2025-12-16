@@ -205,7 +205,7 @@ class TimeWarp:
             return new_motion, frames
         return new_motion
         
-    def bake_differentiable(self, motion, frs, normalized = False):
+    def bake_differentiable_old(self, motion, frs, normalized = False):
          
         grid = torch.zeros(motion.shape[0], motion.shape[2], motion.shape[3], 2).to(motion.device)
         
@@ -229,5 +229,43 @@ class TimeWarp:
         
         new_motion = torch.nn.functional.grid_sample( motion, grid) 
         return new_motion
+    
+    def bake_differentiable(self, motion, frs, normalized = False, num_frames=60, ctrl_pts=False, integrate=True, overwrite=False, overwrite_vals=None, warp_name=""):
+         
+        grid = torch.zeros(motion.shape[0], motion.shape[2], frs.shape[1], 2).to(motion.device)
+        num_frames_norm = num_frames // 2 
+        if not normalized:
+            frs =  (frs / num_frames_norm) - 1
 
+        if not normalized:
+            for i in range(1, frs.shape[1]):
+                grid[:, :, i, 1] = -1
+                grid[:, :, i, 0] = frs[:, i].unsqueeze(1)
+        else:
+            if integrate:
+                for i in range(0, frs.shape[1]):
+                    grid[:, :, i, 1] = -1
+                    if i == 0:
+                        grid[:, :, i, 0] = frs[:, i].unsqueeze(1)
+                    else:
+                        grid[:, :, i, 0] = frs[:, i].unsqueeze(1) + grid[:, :, i - 1, 0]
+            else:
+                for i in range(0, frs.shape[1]):
+                    grid[:, :, i, 1] = -1
+                    grid[:, :, i, 0] = frs[:, i].unsqueeze(1)
+            
+            if overwrite:
+                overwrite_vals = overwrite_vals.squeeze(1).squeeze(1)
+                for i in range(0, overwrite_vals.shape[0]):
+                    inds_to_overwrite = torch.where(overwrite_vals[i])[0]
+                    grid[i, :, inds_to_overwrite, 0] == inds_to_overwrite
+
+            
+            grid[:, :, :, 0] = grid[:, :, :, 0] / num_frames_norm - 1
+
+        if ctrl_pts:
+            grid = torch.nn.functional.interpolate(grid.squeeze(1).permute(0, 2, 1), size=60, mode="linear").unsqueeze(1).permute(0, 1, 3, 2)
+        
+        new_motion = torch.nn.functional.grid_sample( motion, grid) 
+        return new_motion
 
